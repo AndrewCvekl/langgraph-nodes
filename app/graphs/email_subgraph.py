@@ -259,11 +259,11 @@ def email_interrupt_new_email(state: AppState) -> Command[Literal["email_update_
     # Check if user was already verified (context message)
     verified = state.get("verified", False)
     email_flow = state.get("email_flow", {})
-    status = email_flow.get("status", "")
+    verification_id = email_flow.get("verification_id", "")
     
-    # If we came here directly (status is await_new_email from init), user was already verified
-    # Otherwise, they just completed verification
-    if status == "await_new_email" and verified:
+    # If verification_id is empty/not set, user came directly from init (was already verified)
+    # If verification_id is set, they just completed verification now
+    if verified and not verification_id:
         context = "No problem! You're already verified for this session."
     else:
         context = ""
