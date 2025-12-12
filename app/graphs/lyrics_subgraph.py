@@ -20,7 +20,7 @@ from langgraph.types import interrupt, Command
 
 from app.models.state import AppState
 from app.db import get_engine
-from app.tools.db_tools import find_track_by_title_artist
+from app.tools.db_tools import find_track_by_title_artist, check_track_already_purchased
 from app.tools.genius_mock import get_genius
 from app.tools.youtube_mock import get_youtube
 from app.graphs.payment_subgraph import payment_subgraph
@@ -81,6 +81,7 @@ def lyrics_init_extract(state: AppState) -> dict:
             "lyrics_query": lyrics_query,
             "genius_best": {},
             "catalogue_track": None,
+            "already_owned": False,
             "youtube": {},
         },
     }
@@ -125,9 +126,9 @@ def lyrics_genius_search(state: AppState) -> Command[Literal["lyrics_catalogue_l
     )
 
 
-# Node B2: Check if song is in our catalogue
+# Node B2: Check if song is in our catalogue and if user already owns it
 def lyrics_catalogue_lookup(state: AppState) -> dict:
-    """Look up the song in our catalogue and inform the user.
+    """Look up the song in our catalogue and check if user already owns it.
     
     Returns a dict (not Command) so that the state update is checkpointed
     before the interrupt node runs. This ensures assistant messages display
@@ -135,6 +136,7 @@ def lyrics_catalogue_lookup(state: AppState) -> dict:
     """
     lyrics_flow = state.get("lyrics_flow", {})
     genius_best = lyrics_flow.get("genius_best", {})
+    user_id = state.get("user_id", 1)
     
     title = genius_best.get("title", "")
     artist = genius_best.get("artist", "")
@@ -142,12 +144,24 @@ def lyrics_catalogue_lookup(state: AppState) -> dict:
     engine = get_engine()
     catalogue_track = find_track_by_title_artist(engine, title, artist)
     
-    # Inform user about the song and catalogue status
+    # Check if user already owns this track
+    already_owned = False
     if catalogue_track:
-        msg = (
-            f"I think you're thinking of \"{title}\" by {artist}! "
-            f"Great news - it's in our catalogue for ${catalogue_track['UnitPrice']:.2f}."
-        )
+        track_id = catalogue_track.get("TrackId")
+        already_owned = check_track_already_purchased(engine, user_id, track_id)
+    
+    # Inform user about the song and catalogue/ownership status
+    if catalogue_track:
+        if already_owned:
+            msg = (
+                f"I think you're thinking of \"{title}\" by {artist}! "
+                "Good news - you already own this track! 🎵"
+            )
+        else:
+            msg = (
+                f"I think you're thinking of \"{title}\" by {artist}! "
+                f"Great news - it's in our catalogue for ${catalogue_track['UnitPrice']:.2f}."
+            )
     else:
         msg = (
             f"I think you're thinking of \"{title}\" by {artist}. "
@@ -159,6 +173,7 @@ def lyrics_catalogue_lookup(state: AppState) -> dict:
             **lyrics_flow,
             "status": "await_listen_confirm",
             "catalogue_track": catalogue_track,
+            "already_owned": already_owned,
         },
         "assistant_messages": add_assistant_message(state, msg),
     }
@@ -174,16 +189,23 @@ def lyrics_interrupt_listen_confirm(state: AppState) -> Command[Literal["lyrics_
     lyrics_flow = state.get("lyrics_flow", {})
     genius_best = lyrics_flow.get("genius_best", {})
     catalogue_track = lyrics_flow.get("catalogue_track")
+    already_owned = lyrics_flow.get("already_owned", False)
     
     title = genius_best.get("title", "")
     artist = genius_best.get("artist", "")
     
     # Build context message to show before the question
     if catalogue_track:
-        context = (
-            f"I think you're thinking of \"{title}\" by {artist}! "
-            f"Great news - it's in our catalogue for ${catalogue_track['UnitPrice']:.2f}."
-        )
+        if already_owned:
+            context = (
+                f"I think you're thinking of \"{title}\" by {artist}! "
+                "Good news - you already own this track! 🎵"
+            )
+        else:
+            context = (
+                f"I think you're thinking of \"{title}\" by {artist}! "
+                f"Great news - it's in our catalogue for ${catalogue_track['UnitPrice']:.2f}."
+            )
     else:
         context = (
             f"I think you're thinking of \"{title}\" by {artist}. "
@@ -234,23 +256,25 @@ def lyrics_youtube_search(state: AppState) -> dict:
 
 
 # Node B5: Render player and make offer message
-def lyrics_render_player_and_offer(state: AppState) -> dict:
+def lyrics_render_player_and_offer(state: AppState) -> Command[Literal["lyrics_interrupt_buy_confirm", "lyrics_interrupt_request_confirm", "lyrics_done"]]:
     """Render the YouTube player and prepare the offer message.
-    
-    Returns a dict (not Command) so that the state update is checkpointed
-    before the interrupt node runs. This ensures the player and message
-    display before the interrupt prompt.
+
+    Routes based on catalogue status and ownership:
+    - Already owned: just show player and finish
+    - In catalogue (not owned): offer to purchase
+    - Not in catalogue: offer to request addition
     """
     lyrics_flow = state.get("lyrics_flow", {})
     youtube_info = lyrics_flow.get("youtube", {})
     catalogue_track = lyrics_flow.get("catalogue_track")
-    
+    already_owned = lyrics_flow.get("already_owned", False)
+
     video_id = youtube_info.get("video_id", "")
-    
+
     # Create embed message
     yt = get_youtube()
     embed_html = yt.get_embed_html(video_id, autoplay=True)
-    
+
     messages = state.get("assistant_messages", []) or []
     messages = messages + [{
         "type": "embed",
@@ -259,56 +283,48 @@ def lyrics_render_player_and_offer(state: AppState) -> dict:
         "url": youtube_info.get("url", ""),
         "html": embed_html,
     }]
-    
-    if catalogue_track:
-        # Song is in catalogue - offer to purchase
-        price = catalogue_track.get("UnitPrice", 0.99)
+
+    # Determine routing based on catalogue status and ownership
+    if already_owned:
+        # User already owns this track - just show player and finish
         messages = messages + [{
             "type": "text",
-            "text": f"Would you like to purchase this track for ${price:.2f}?",
+            "text": "Enjoy your music! Let me know if you need anything else.",
         }]
+        goto = "lyrics_done"
+    elif catalogue_track:
+        # Song is in catalogue but not owned - route to purchase interrupt
+        goto = "lyrics_interrupt_buy_confirm"
     else:
-        # Song not in catalogue - ask if they'd be interested in seeing it added
-        messages = messages + [{
-            "type": "text",
-            "text": "Is this the sort of song you'd like to see added to our catalogue?",
-        }]
-    
-    return {
-        "lyrics_flow": {
-            **lyrics_flow,
-            "status": "await_buy_or_request",
+        # Song not in catalogue - route to request interrupt
+        goto = "lyrics_interrupt_request_confirm"
+
+    return Command(
+        update={
+            "lyrics_flow": {
+                **lyrics_flow,
+                "status": "done" if already_owned else "await_buy_or_request",
+            },
+            "assistant_messages": messages,
         },
-        "assistant_messages": messages,
-    }
-
-
-# Node B5b: Route to appropriate offer interrupt
-def lyrics_route_offer(state: AppState) -> Command[Literal["lyrics_interrupt_buy_confirm", "lyrics_interrupt_request_confirm"]]:
-    """Route to buy or request interrupt based on catalogue availability."""
-    lyrics_flow = state.get("lyrics_flow", {})
-    catalogue_track = lyrics_flow.get("catalogue_track")
-    
-    if catalogue_track:
-        return Command(goto="lyrics_interrupt_buy_confirm")
-    else:
-        return Command(goto="lyrics_interrupt_request_confirm")
+        goto=goto,
+    )
 
 
 # Node B6: Interrupt to confirm purchase
 def lyrics_interrupt_buy_confirm(state: AppState) -> Command[Literal["lyrics_invoke_payment", "lyrics_done"]]:
     """Interrupt to confirm purchase.
-    
+
     Includes player context in the interrupt payload.
     """
     lyrics_flow = state.get("lyrics_flow", {})
     catalogue_track = lyrics_flow.get("catalogue_track", {})
     youtube_info = lyrics_flow.get("youtube", {})
     price = catalogue_track.get("UnitPrice", 0.99) if catalogue_track else 0.99
-    
+
     # Context shows the player info
     context = f"🎵 Now playing: {youtube_info.get('url', '')}"
-    
+
     decision = interrupt({
         "type": "confirm",
         "title": "Purchase Track",
@@ -316,18 +332,20 @@ def lyrics_interrupt_buy_confirm(state: AppState) -> Command[Literal["lyrics_inv
         "text": f"Would you like to purchase this track for ${price:.2f}?",
         "choices": ["Yes", "No"],
     })
-    
+
     if decision == "Yes":
         return Command(goto="lyrics_invoke_payment")
     else:
         return Command(
             update={
                 "assistant_messages": add_assistant_message(
-                    state, "No problem! Enjoy the preview. Let me know if you change your mind."
+                    state, "No worries! Enjoy the preview. Let me know if you need anything else."
                 ),
             },
             goto="lyrics_done",
         )
+
+
 
 
 # Node B7: Invoke payment subgraph
@@ -429,7 +447,6 @@ def create_lyrics_subgraph() -> StateGraph:
     builder.add_node("lyrics_interrupt_listen_confirm", lyrics_interrupt_listen_confirm)
     builder.add_node("lyrics_youtube_search", lyrics_youtube_search)
     builder.add_node("lyrics_render_player_and_offer", lyrics_render_player_and_offer)
-    builder.add_node("lyrics_route_offer", lyrics_route_offer)
     builder.add_node("lyrics_interrupt_buy_confirm", lyrics_interrupt_buy_confirm)
     builder.add_node("lyrics_invoke_payment", lyrics_invoke_payment)
     builder.add_node("lyrics_interrupt_request_confirm", lyrics_interrupt_request_confirm)
@@ -453,11 +470,8 @@ def create_lyrics_subgraph() -> StateGraph:
     # YouTube search and player rendering
     builder.add_edge("lyrics_youtube_search", "lyrics_render_player_and_offer")
     
-    # lyrics_render_player_and_offer returns dict, edge to router
-    # This ensures player embed and message are checkpointed before interrupt
-    builder.add_edge("lyrics_render_player_and_offer", "lyrics_route_offer")
-    
-    # lyrics_route_offer uses Command to go to buy or request interrupt
+    # lyrics_render_player_and_offer uses Command to route to buy or request interrupt
+    # based on catalogue status
     
     # Payment flow
     builder.add_edge("lyrics_invoke_payment", "payment_flow")

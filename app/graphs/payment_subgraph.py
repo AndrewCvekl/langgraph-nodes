@@ -36,7 +36,7 @@ def payment_build_quote(state: AppState) -> dict:
     """Build a payment quote from items."""
     payment = state.get("payment", {})
     items = payment.get("items", [])
-    
+
     if not items:
         return {
             "payment": {
@@ -48,19 +48,19 @@ def payment_build_quote(state: AppState) -> dict:
                 state, "Sorry, there was an error with your order. No items found."
             ),
         }
-    
+
     # Calculate total
     total = sum(item.get("unit_price", 0) * item.get("qty", 1) for item in items)
-    
+
     # Generate payment intent ID for idempotency
     payment_intent_id = f"pi_{uuid.uuid4().hex[:16]}"
-    
+
     # Format items for display
     items_display = ", ".join(
         f"{item.get('name', 'Unknown')} (${item.get('unit_price', 0):.2f})"
         for item in items
     )
-    
+
     return {
         "payment": {
             **payment,
@@ -251,7 +251,7 @@ def create_payment_subgraph() -> StateGraph:
     
     # Add all nodes
     builder.add_node("payment_build_quote", payment_build_quote)
-    builder.add_node("payment_interrupt_confirm", payment_interrupt_confirm)
+    # Removed payment_interrupt_confirm - confirmation already happened in parent flow
     builder.add_node("payment_execute_charge", payment_execute_charge)
     builder.add_node("payment_commit_invoice", payment_commit_invoice)
     builder.add_node("payment_render_receipt", payment_render_receipt)
@@ -261,14 +261,15 @@ def create_payment_subgraph() -> StateGraph:
     
     # Add edges
     builder.set_entry_point("payment_build_quote")
-    builder.add_edge("payment_build_quote", "payment_interrupt_confirm")
+    # Go directly to charge after building quote - no extra confirmation needed
+    builder.add_edge("payment_build_quote", "payment_execute_charge")
     builder.add_edge("payment_commit_invoice", "payment_render_receipt")
     builder.add_edge("payment_render_receipt", "payment_done")
     builder.add_edge("payment_cancel", "payment_done")
     builder.add_edge("payment_failed", "payment_done")
     builder.add_edge("payment_done", END)
     
-    # Note: payment_interrupt_confirm and payment_execute_charge use Command
+    # Note: payment_execute_charge uses Command to route
     
     return builder
 

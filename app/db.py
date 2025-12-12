@@ -16,27 +16,38 @@ CHINOOK_SQL_URL = "https://raw.githubusercontent.com/lerocha/chinook-database/ma
 
 
 def get_engine_for_chinook_db() -> Engine:
-    """Pull SQL file, populate in-memory database, and create engine.
+    """Pull SQL file, populate database, and create engine.
     
     Downloads the Chinook database SQL script from GitHub and creates
-    an in-memory SQLite database with the schema and data.
+    a file-based SQLite database with the schema and data. The database
+    will be created only if it doesn't already exist, ensuring data persists
+    across application restarts.
     
     Returns:
-        SQLAlchemy Engine connected to the in-memory Chinook database.
+        SQLAlchemy Engine connected to the Chinook database.
     """
-    response = requests.get(CHINOOK_SQL_URL)
-    response.raise_for_status()
-    sql_script = response.text
-
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.executescript(sql_script)
+    import os
     
-    # Update demo user (Customer ID 1) with real phone for Twilio verification
-    connection.execute(
-        "UPDATE Customer SET Phone = ? WHERE CustomerId = 1",
-        ("+19144342859",)
-    )
-    connection.commit()
+    # Use a file-based database that persists across restarts
+    db_path = "chinook.db"
+    db_exists = os.path.exists(db_path)
+    
+    # Create connection to file-based database
+    connection = sqlite3.connect(db_path, check_same_thread=False)
+    
+    # Only initialize the database if it doesn't exist
+    if not db_exists:
+        response = requests.get(CHINOOK_SQL_URL)
+        response.raise_for_status()
+        sql_script = response.text
+        connection.executescript(sql_script)
+        
+        # Update demo user (Customer ID 1) with real phone for Twilio verification
+        connection.execute(
+            "UPDATE Customer SET Phone = ? WHERE CustomerId = 1",
+            ("+19144342859",)
+        )
+        connection.commit()
     
     return create_engine(
         "sqlite://",

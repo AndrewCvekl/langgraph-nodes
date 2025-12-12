@@ -16,7 +16,7 @@ from app.config import config
 
 class Route(BaseModel):
     """Routing decision from the router agent."""
-    
+
     choice: Literal["normal", "update_email", "lyrics_search"] = Field(
         description="The route to take based on user intent"
     )
@@ -51,6 +51,7 @@ Your job is to analyze the user's message and decide which handler should proces
    - User provides multiple words/phrases that are clearly lyrics
    - User describes a song they're looking for with lyrics
    - DO NOT use for single words, greetings, or casual conversation that happens to contain words that appear in songs
+   - "I'd like to purchase [song name]"
 
 ## Important Rules
 
@@ -128,10 +129,10 @@ def router_agent(messages: list[BaseMessage]) -> Route:
 
 def get_route_choice(messages: list[BaseMessage]) -> Literal["normal", "update_email", "lyrics_search"]:
     """Get just the route choice from the router agent.
-    
+
     Args:
         messages: Conversation messages.
-        
+
     Returns:
         Route choice string.
     """

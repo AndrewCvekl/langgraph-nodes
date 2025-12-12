@@ -383,6 +383,36 @@ def get_customer_invoices(engine: Engine, customer_id: int) -> list[dict]:
     ]
 
 
+def check_track_already_purchased(
+    engine: Engine,
+    customer_id: int,
+    track_id: int
+) -> bool:
+    """Check if a customer has already purchased a specific track.
+    
+    Args:
+        engine: SQLAlchemy database engine.
+        customer_id: Customer ID.
+        track_id: Track ID to check.
+        
+    Returns:
+        True if the customer has already purchased this track, False otherwise.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                SELECT COUNT(*) 
+                FROM InvoiceLine
+                JOIN Invoice ON InvoiceLine.InvoiceId = Invoice.InvoiceId
+                WHERE Invoice.CustomerId = :customer_id
+                  AND InvoiceLine.TrackId = :track_id
+            """),
+            {"customer_id": customer_id, "track_id": track_id}
+        ).fetchone()
+    
+    return result[0] > 0 if result else False
+
+
 def get_all_genres(engine: Engine) -> list[dict]:
     """Get all available genres in the catalogue.
     
@@ -560,11 +590,11 @@ def search_artists(engine: Engine, artist_substr: str = "") -> list[dict]:
 
 def search_albums(engine: Engine, album_substr: str = "") -> list[dict]:
     """Search for albums by title (partial match). If empty string, returns all albums (limited).
-    
+
     Args:
         engine: SQLAlchemy database engine.
         album_substr: Album title substring to search. Empty string returns all albums.
-        
+
     Returns:
         List of dicts with AlbumTitle and ArtistName keys.
     """
@@ -572,7 +602,7 @@ def search_albums(engine: Engine, album_substr: str = "") -> list[dict]:
         if album_substr:
             results = conn.execute(
                 text("""
-                    SELECT DISTINCT 
+                    SELECT DISTINCT
                         Album.Title AS AlbumTitle,
                         Artist.Name AS ArtistName
                     FROM Album
@@ -586,7 +616,7 @@ def search_albums(engine: Engine, album_substr: str = "") -> list[dict]:
         else:
             results = conn.execute(
                 text("""
-                    SELECT DISTINCT 
+                    SELECT DISTINCT
                         Album.Title AS AlbumTitle,
                         Artist.Name AS ArtistName
                     FROM Album
@@ -595,7 +625,7 @@ def search_albums(engine: Engine, album_substr: str = "") -> list[dict]:
                     LIMIT 100
                 """)
             ).fetchall()
-    
+
     return [
         {
             "AlbumTitle": r[0],

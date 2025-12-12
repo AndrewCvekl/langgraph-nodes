@@ -25,7 +25,6 @@ from app.agents.music import music_agent
 from app.agents.customer import customer_agent
 from app.graphs.email_subgraph import email_subgraph
 from app.graphs.lyrics_subgraph import lyrics_subgraph
-from app.graphs.payment_subgraph import payment_subgraph
 
 logger = logging.getLogger(__name__)
 
