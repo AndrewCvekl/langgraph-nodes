@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from app.config import config
 from app.db import get_engine
-from app.tools.db_tools import get_customer_info, get_customer_invoices, get_customer_contact
+from app.tools.db_tools import get_customer_info, get_customer_invoices, get_customer_contact, get_invoice_details
 
 
 CUSTOMER_SYSTEM_PROMPT = """You are a helpful customer service assistant for a music store.
@@ -20,14 +20,27 @@ Your job is to help customers with questions about their account information.
 You have access to tools to look up customer data:
 - get_account_info: Get the customer's full account information
 - get_purchase_history: Get the customer's recent purchases/invoices
+- get_invoice_details: Get detailed information for a specific invoice (items purchased, billing info)
+
+WHAT CUSTOMERS CAN DO:
+- View their account information (name, email, phone, address)
+- View their purchase history and invoices
+- Update their email address (through a verification process)
+
+WHAT CUSTOMERS CANNOT DO:
+- Update their name, phone, address, or other account details (read-only)
+- These fields can only be updated by contacting customer support directly
 
 IMPORTANT SECURITY RULES:
 - You can ONLY access information for the current logged-in user
 - Never reveal information about other customers
 - The customer ID is provided automatically - don't ask for it
 
-For email updates/changes, let the customer know they'll need to go through a verification process.
+For email updates, let the customer know they can request to change it and will go through a verification process.
 Do not try to update emails directly - that's handled by a different system.
+
+If customers ask to update anything other than email (name, phone, address, etc.), 
+politely explain that those fields require contacting customer support directly for security reasons.
 
 Be helpful and friendly. Protect customer privacy."""
 
@@ -81,7 +94,40 @@ def make_customer_tools(user_id: int):
         except Exception as e:
             return f"Error retrieving purchase history: {str(e)}"
     
-    return [get_account_info, get_purchase_history]
+    @tool
+    def get_invoice_info(invoice_id: int) -> str:
+        """Get detailed information for a specific invoice.
+        
+        Args:
+            invoice_id: The invoice number to look up.
+            
+        Returns detailed invoice information including items purchased.
+        """
+        engine = get_engine()
+        try:
+            invoice = get_invoice_details(engine, user_id, invoice_id)
+            
+            result = f"Invoice #{invoice['InvoiceId']}\n"
+            result += f"Date: {invoice['InvoiceDate']}\n"
+            result += f"Total: ${invoice['Total']:.2f}\n\n"
+            result += f"Billing Address:\n"
+            result += f"{invoice['BillingAddress']}\n"
+            result += f"{invoice['BillingCity']}, {invoice['BillingState']} {invoice['BillingPostalCode']}\n"
+            result += f"{invoice['BillingCountry']}\n\n"
+            result += f"Items Purchased:\n"
+            
+            for idx, item in enumerate(invoice['Items'], 1):
+                result += f"{idx}. {item['TrackName']} by {item['ArtistName']}\n"
+                result += f"   Album: {item['AlbumTitle']}\n"
+                result += f"   Price: ${item['UnitPrice']:.2f} x {item['Quantity']}\n"
+            
+            return result
+        except ValueError as e:
+            return f"Error: {str(e)}"
+        except Exception as e:
+            return f"Error retrieving invoice details: {str(e)}"
+    
+    return [get_account_info, get_purchase_history, get_invoice_info]
 
 
 def get_customer_model() -> ChatOpenAI:

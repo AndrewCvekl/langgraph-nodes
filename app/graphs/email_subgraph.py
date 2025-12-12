@@ -29,67 +29,104 @@ def add_assistant_message(state: AppState, text: str) -> list[dict]:
 
 
 # Node A0: Initialize email flow
-def email_init(state: AppState) -> dict:
+def email_init(state: AppState) -> Command[Literal["email_interrupt_confirm_send", "email_interrupt_new_email"]]:
     """Initialize the email update flow by fetching current contact info."""
     user_id = state.get("user_id")
+    verified = state.get("verified", False)
+    
     if not user_id:
-        return {
-            "email_flow": {
-                "status": "failed",
-                "error": "No user ID provided",
+        return Command(
+            update={
+                "email_flow": {
+                    "status": "failed",
+                    "error": "No user ID provided",
+                },
+                # Clear previous messages and only show the error message
+                "assistant_messages": [
+                    {"type": "text", "text": "Sorry, I couldn't identify your account. Please try again."}
+                ],
             },
-            "assistant_messages": add_assistant_message(
-                state, "Sorry, I couldn't identify your account. Please try again."
-            ),
-        }
+            goto="email_done",
+        )
     
     engine = get_engine()
     try:
         contact = get_customer_contact(engine, user_id)
     except ValueError as e:
-        return {
-            "email_flow": {
-                "status": "failed",
-                "error": str(e),
+        return Command(
+            update={
+                "email_flow": {
+                    "status": "failed",
+                    "error": str(e),
+                },
+                # Clear previous messages and only show the error message
+                "assistant_messages": [
+                    {"type": "text", "text": "Sorry, I couldn't find your account information."}
+                ],
             },
-            "assistant_messages": add_assistant_message(
-                state, "Sorry, I couldn't find your account information."
-            ),
-        }
+            goto="email_done",
+        )
     
     phone = contact.get("Phone", "")
     email = contact.get("Email", "")
     
+    # If user is already verified in this session, skip verification
+    if verified:
+        return Command(
+            update={
+                "email_flow": {
+                    "status": "await_new_email",
+                    "current_email": email,
+                    "phone": phone,
+                    "code_attempts_left": 3,
+                    "verification_id": "",
+                    "last_code_entered": "",
+                    "proposed_email": "",
+                    "error": "",
+                },
+            },
+            goto="email_interrupt_new_email",
+        )
+    
     # Mask phone for display
     phone_display = f"***{phone[-4:]}" if len(phone) >= 4 else "****"
     
-    return {
-        "email_flow": {
-            "status": "confirm_send",
-            "current_email": email,
-            "phone": phone,
-            "code_attempts_left": 3,
-            "verification_id": "",
-            "last_code_entered": "",
-            "proposed_email": "",
-            "error": "",
+    return Command(
+        update={
+            "email_flow": {
+                "status": "confirm_send",
+                "current_email": email,
+                "phone": phone,
+                "code_attempts_left": 3,
+                "verification_id": "",
+                "last_code_entered": "",
+                "proposed_email": "",
+                "error": "",
+            },
+            "assistant_messages": add_assistant_message(
+                state,
+                f"I can update your email address. For security, I'll need to verify "
+                f"using the phone number on file ending in {phone_display}. "
+                f"Would you like me to send a verification code?"
+            ),
         },
-        "assistant_messages": add_assistant_message(
-            state,
-            f"I can update your email address. For security, I'll need to verify "
-            f"using the phone number on file ending in {phone_display}. "
-            f"Would you like me to send a verification code?"
-        ),
-    }
+        goto="email_interrupt_confirm_send",
+    )
 
 
 # Node A1: Interrupt to confirm sending code
 def email_interrupt_confirm_send(state: AppState) -> Command[Literal["email_send_code", "email_cancel"]]:
     """Interrupt to confirm sending verification code."""
+    email_flow = state.get("email_flow", {})
+    phone = email_flow.get("phone", "")
+    
+    # Mask phone for display
+    phone_display = f"***{phone[-4:]}" if len(phone) >= 4 else "****"
+    
     decision = interrupt({
         "type": "confirm",
         "title": "Send Verification Code",
-        "text": "Send verification code to the phone number on file?",
+        "text": f"In order to change your email, we need to verify you first. Can we send a verification code to {phone_display}?",
         "choices": ["Yes", "No"],
     })
     
@@ -175,6 +212,7 @@ def email_check_code(state: AppState) -> Command[Literal["email_interrupt_new_em
     if is_valid:
         return Command(
             update={
+                "verified": True,  # Mark user as verified for this session
                 "email_flow": {
                     **email_flow,
                     "status": "await_new_email",
@@ -218,12 +256,29 @@ def email_check_code(state: AppState) -> Command[Literal["email_interrupt_new_em
 # Node A5: Interrupt to get new email
 def email_interrupt_new_email(state: AppState) -> Command[Literal["email_update_db"]]:
     """Interrupt to get the new email address from user."""
-    new_email = interrupt({
+    # Check if user was already verified (context message)
+    verified = state.get("verified", False)
+    email_flow = state.get("email_flow", {})
+    status = email_flow.get("status", "")
+    
+    # If we came here directly (status is await_new_email from init), user was already verified
+    # Otherwise, they just completed verification
+    if status == "await_new_email" and verified:
+        context = "No problem! You're already verified for this session."
+    else:
+        context = ""
+    
+    interrupt_data = {
         "type": "input",
         "title": "New Email Address",
         "text": "Please enter your new email address.",
         "placeholder": "newemail@example.com",
-    })
+    }
+    
+    if context:
+        interrupt_data["context"] = context
+    
+    new_email = interrupt(interrupt_data)
     
     return Command(
         update={
@@ -269,9 +324,10 @@ def email_update_db(state: AppState) -> Command[Literal["email_done", "email_int
                     "status": "failed",
                     "error": str(e),
                 },
-                "assistant_messages": add_assistant_message(
-                    state, f"Sorry, there was an error updating your email: {str(e)}"
-                ),
+                # Clear previous messages and only show the final error message
+                "assistant_messages": [
+                    {"type": "text", "text": f"Sorry, there was an error updating your email: {str(e)}"}
+                ],
             },
             goto="email_done",
         )
@@ -282,9 +338,10 @@ def email_update_db(state: AppState) -> Command[Literal["email_done", "email_int
                 **email_flow,
                 "status": "done",
             },
-            "assistant_messages": add_assistant_message(
-                state, f"Done! Your email has been updated to {proposed_email}."
-            ),
+            # Clear previous messages and only show the final success message
+            "assistant_messages": [
+                {"type": "text", "text": f"Done! Your email has been updated to {proposed_email}."}
+            ],
         },
         goto="email_done",
     )
@@ -298,9 +355,10 @@ def email_cancel(state: AppState) -> dict:
             **state.get("email_flow", {}),
             "status": "cancelled",
         },
-        "assistant_messages": add_assistant_message(
-            state, "No problem! Email update cancelled. What else can I help you with?"
-        ),
+        # Clear previous messages and only show the final cancellation message
+        "assistant_messages": [
+            {"type": "text", "text": "No problem! Email update cancelled. What else can I help you with?"}
+        ],
     }
 
 
@@ -314,11 +372,14 @@ def email_failed(state: AppState) -> dict:
             **state.get("email_flow", {}),
             "status": "failed",
         },
-        "assistant_messages": add_assistant_message(
-            state,
-            f"Sorry, the email update could not be completed: {error}. "
-            "Please try again later or contact support."
-        ),
+        # Clear previous messages and only show the final error message
+        "assistant_messages": [
+            {
+                "type": "text",
+                "text": f"Sorry, the email update could not be completed: {error}. "
+                        "Please try again later or contact support."
+            }
+        ],
     }
 
 
@@ -347,13 +408,13 @@ def create_email_subgraph() -> StateGraph:
     
     # Add edges
     builder.set_entry_point("email_init")
-    builder.add_edge("email_init", "email_interrupt_confirm_send")
+    # email_init now uses Command to route based on verification status
     builder.add_edge("email_send_code", "email_interrupt_enter_code")
     builder.add_edge("email_cancel", "email_done")
     builder.add_edge("email_failed", "email_done")
     builder.add_edge("email_done", END)
     
-    # Note: email_interrupt_confirm_send, email_interrupt_enter_code, 
+    # Note: email_init, email_interrupt_confirm_send, email_interrupt_enter_code, 
     # email_check_code, email_interrupt_new_email, email_update_db
     # use Command to specify their next nodes
     

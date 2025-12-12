@@ -95,6 +95,9 @@ class AppState(TypedDict, total=False):
     # Routing decision from router agent
     route: Literal["normal", "update_email", "lyrics_search"]
     
+    # Session-based verification status (persists until app restart)
+    verified: bool
+    
     # Feature-specific state slices
     email_flow: EmailFlowState
     lyrics_flow: LyricsFlowState
@@ -153,6 +156,7 @@ def get_initial_state(user_id: int) -> AppState:
         "user_id": user_id,
         "last_user_msg": "",
         "route": "normal",
+        "verified": False,
         "email_flow": get_default_email_flow(),
         "lyrics_flow": get_default_lyrics_flow(),
         "payment": get_default_payment(),

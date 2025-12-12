@@ -42,6 +42,7 @@ def ingest_user_message(state: AppState) -> dict:
     This node:
     - Stores the last user message for easy access
     - Clears previous assistant messages for new turn
+    - Clears completed flows to prevent re-entry
     """
     messages = state.get("messages", [])
     logger.info(f"[ingest_user_message] Processing {len(messages)} message(s)")
@@ -55,10 +56,19 @@ def ingest_user_message(state: AppState) -> dict:
     
     logger.info(f"[ingest_user_message] Last user message: {last_user_msg[:50]}...")
     
-    return {
+    # Clear completed email flow to prevent accidental re-entry
+    email_flow = state.get("email_flow", {})
+    email_flow_status = email_flow.get("status", "")
+    updates = {
         "last_user_msg": last_user_msg,
         "assistant_messages": [],  # Clear for new turn
     }
+    
+    # If email flow completed, reset it
+    if email_flow_status in ("done", "cancelled", "failed"):
+        updates["email_flow"] = {}
+    
+    return updates
 
 
 # Node 2: Route intent
@@ -70,6 +80,17 @@ def route_intent(state: AppState) -> Command[Literal["normal_conversation", "run
     # Get route from router agent
     route = get_route_choice(messages)
     logger.info(f"[route_intent] Route decision: {route}")
+    
+    # Simple fix: If email flow just completed, don't start it again unless explicitly requested
+    email_flow = state.get("email_flow", {})
+    email_flow_status = email_flow.get("status", "")
+    if route == "update_email" and email_flow_status in ("done", "cancelled", "failed"):
+        # Check if user is explicitly requesting email update again
+        last_msg = state.get("last_user_msg", "").lower()
+        explicit_keywords = ["update", "change", "modify", "new email"]
+        if not any(keyword in last_msg for keyword in explicit_keywords):
+            logger.info(f"[route_intent] Email flow just completed ({email_flow_status}), treating as normal conversation")
+            route = "normal"
     
     # Map route to node
     if route == "update_email":
@@ -178,9 +199,10 @@ def run_email_update_subgraph(state: AppState, config: RunnableConfig) -> dict:
     
     logger.info(f"[run_email_update_subgraph] Completed, status: {result.get('email_flow', {}).get('status')}")
     
-    # Merge relevant state back
+    # Merge relevant state back including the verified flag
     return {
         "email_flow": result.get("email_flow", {}),
+        "verified": result.get("verified", False),
         "messages": result.get("messages", []),
         "assistant_messages": result.get("assistant_messages", []),
     }

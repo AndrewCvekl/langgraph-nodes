@@ -634,3 +634,82 @@ def search_albums(engine: Engine, album_substr: str = "") -> list[dict]:
         for r in results
     ]
 
+
+def get_invoice_details(engine: Engine, customer_id: int, invoice_id: int) -> dict:
+    """Get detailed information for a specific invoice.
+    
+    Args:
+        engine: SQLAlchemy database engine.
+        customer_id: Customer ID (for security - ensures customer owns the invoice).
+        invoice_id: Invoice ID to retrieve.
+        
+    Returns:
+        Dict with invoice header and line items.
+        Keys: InvoiceId, InvoiceDate, Total, BillingAddress, BillingCity, 
+              BillingState, BillingCountry, BillingPostalCode, Items (list)
+        
+    Raises:
+        ValueError: If invoice not found or doesn't belong to customer.
+    """
+    with engine.connect() as conn:
+        # Get invoice header
+        invoice_result = conn.execute(
+            text("""
+                SELECT 
+                    InvoiceId, CustomerId, InvoiceDate, Total,
+                    BillingAddress, BillingCity, BillingState,
+                    BillingCountry, BillingPostalCode
+                FROM Invoice
+                WHERE InvoiceId = :invoice_id AND CustomerId = :customer_id
+            """),
+            {"invoice_id": invoice_id, "customer_id": customer_id}
+        ).fetchone()
+        
+        if invoice_result is None:
+            raise ValueError(
+                f"Invoice #{invoice_id} not found or does not belong to customer"
+            )
+        
+        # Get invoice line items
+        items_result = conn.execute(
+            text("""
+                SELECT 
+                    Track.Name AS TrackName,
+                    Artist.Name AS ArtistName,
+                    Album.Title AS AlbumTitle,
+                    InvoiceLine.UnitPrice,
+                    InvoiceLine.Quantity
+                FROM InvoiceLine
+                JOIN Track ON InvoiceLine.TrackId = Track.TrackId
+                JOIN Album ON Track.AlbumId = Album.AlbumId
+                JOIN Artist ON Album.ArtistId = Artist.ArtistId
+                WHERE InvoiceLine.InvoiceId = :invoice_id
+                ORDER BY InvoiceLine.InvoiceLineId
+            """),
+            {"invoice_id": invoice_id}
+        ).fetchall()
+        
+        items = [
+            {
+                "TrackName": item[0],
+                "ArtistName": item[1],
+                "AlbumTitle": item[2],
+                "UnitPrice": float(item[3]),
+                "Quantity": item[4],
+            }
+            for item in items_result
+        ]
+        
+        return {
+            "InvoiceId": invoice_result[0],
+            "CustomerId": invoice_result[1],
+            "InvoiceDate": invoice_result[2],
+            "Total": float(invoice_result[3]),
+            "BillingAddress": invoice_result[4],
+            "BillingCity": invoice_result[5],
+            "BillingState": invoice_result[6],
+            "BillingCountry": invoice_result[7],
+            "BillingPostalCode": invoice_result[8],
+            "Items": items,
+        }
+
