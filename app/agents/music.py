@@ -19,11 +19,8 @@ from app.tools.db_tools import (
     get_tracks_by_genre,
     search_artists,
     search_albums,
-    create_invoice_for_track,
-    check_track_already_purchased,
 )
 from app.tools.youtube_mock import get_youtube
-from app.tools.payment_mock import get_payment
 
 
 MUSIC_SYSTEM_PROMPT = """You are a helpful music store assistant. Your job is to help customers find music in our catalogue.
@@ -42,7 +39,6 @@ You have access to tools to search our music database:
 - search_tracks_by_artist: Find individual tracks/songs by an artist name
 - search_songs_by_title: Search for songs by title
 - search_song_video: Find a YouTube video for a song (official audio/video)
-- purchase_song: Purchase a song from the catalogue (requires track_id)
 
 When a customer asks about music:
 1. ALWAYS use the appropriate tool(s) to search our catalogue FIRST
@@ -60,16 +56,14 @@ Examples of questions you MUST query the database for:
 - "What albums by Queen?" → Use search_albums_by_artist("Queen")
 - "What songs by The Beatles?" → Use search_tracks_by_artist("Beatles")
 - "Can I watch the video for <song/artist>?" → Use search_song_video("<song> <artist> official video")
-- "I want to buy <song>" or "Buy <song>" → First use search_songs_by_title to find the track_id, then use purchase_song with the track_id
-- "Can I buy this song?" or "Can I buy <song>?" → Identify which song they're referring to, then ASK for confirmation before purchasing. Do NOT purchase immediately - wait for explicit confirmation like "yes", "buy it", "purchase it". Present a clear Yes/No choice like: "Would you like me to purchase <song> for $X.XX? (Yes/No)"
+- "I want to buy <song>" or "Buy <song>" → First use search_songs_by_title to find Track IDs, then present options and ask which Track ID they'd like to buy.
 
 Be conversational and helpful. Format results nicely when presenting them to customers.
 
 IMPORTANT PURCHASE RULES:
-- NEVER use purchase_song unless the customer has EXPLICITLY confirmed they want to purchase (e.g., "yes", "buy it", "purchase it", "I want to buy it")
-- If a customer asks "can I buy this song?" or "can I buy <song>?", identify the song and ask: "Would you like me to purchase [song name] for $X.XX? (Yes/No)"
-- Only proceed with purchase_song after receiving explicit confirmation
-- If the customer is just asking about purchasing (questions like "can I buy", "how much is", "is it available"), provide information but do NOT purchase
+- If the customer asks to buy, identify the Track ID(s) and ask which one they want to purchase.
+- Do not claim a purchase was completed in normal chat; actual checkout is handled by a dedicated purchase flow.
+- If the customer is just asking about purchasing (questions like "can I buy", "how much is", "is it available"), provide information but do NOT claim to have charged them.
 
 OTHER IMPORTANT RULES:
 - If a customer just says "hi", "hello", or "hey" (simple greetings), respond with a friendly greeting and ask how you can help them find music
@@ -401,113 +395,6 @@ def search_all_albums(album_title: str = "") -> str:
     return result
 
 
-def make_purchase_tool(user_id: int):
-    """Create a purchase tool bound to a specific user ID.
-
-    Args:
-        user_id: The authenticated user's ID.
-
-    Returns:
-        Purchase tool function.
-    """
-    @tool
-    def purchase_song(track_id: int) -> str:
-        """Purchase a song from the catalogue.
-
-        IMPORTANT: Only use this tool when the customer has EXPLICITLY confirmed they want to purchase
-        (e.g., "yes", "buy it", "purchase it", "I want to buy it"). Do NOT use for questions like
-        "can I buy this song?" - those require confirmation first.
-
-        Args:
-            track_id: The track ID to purchase (get this from search results).
-
-        Returns:
-            Confirmation message with invoice details.
-        """
-        from sqlalchemy import text
-
-        engine = get_engine()
-        payment_service = get_payment()
-
-        # Check if user already owns this track
-        already_purchased = check_track_already_purchased(engine, user_id, track_id)
-        if already_purchased:
-            return (
-                f"You already own this track! 🎵\n\n"
-                f"It should be available in your library. "
-                f"Would you like to explore other music?"
-            )
-
-        # Get track info directly from database
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT
-                        Track.TrackId,
-                        Track.Name AS TrackName,
-                        Track.UnitPrice,
-                        Artist.Name AS ArtistName
-                    FROM Track
-                    JOIN Album ON Track.AlbumId = Album.AlbumId
-                    JOIN Artist ON Album.ArtistId = Artist.ArtistId
-                    WHERE Track.TrackId = :track_id
-                """),
-                {"track_id": track_id}
-            ).fetchone()
-
-        if not result:
-            return f"Error: Track with ID {track_id} not found in our catalogue."
-
-        track_name = result[1]
-        unit_price = float(result[2])
-        artist_name = result[3]
-
-        # Create payment intent
-        items = [{
-            "track_id": track_id,
-            "name": track_name,
-            "qty": 1,
-            "unit_price": unit_price,
-        }]
-        intent_id = payment_service.create_payment_intent(unit_price, user_id, items)
-
-        # Process payment
-        result = payment_service.charge(intent_id, unit_price, user_id, items)
-
-        if result.get("status") != "succeeded":
-            return f"Sorry, payment failed: {result.get('reason', 'Unknown error')}. Please try again."
-
-        # Create invoice in database
-        try:
-            invoice_result = create_invoice_for_track(
-                engine,
-                customer_id=user_id,
-                track_id=track_id,
-                unit_price=unit_price,
-                qty=1,
-            )
-            invoice_id = invoice_result.get("invoice_id", 0)
-            transaction_id = result.get("transaction_id", "")
-
-            return (
-                f"Purchase successful! 🎵\n\n"
-                f"Song: {track_name} by {artist_name}\n"
-                f"Price: ${unit_price:.2f}\n"
-                f"Invoice #: {invoice_id}\n"
-                f"Transaction ID: {transaction_id}\n\n"
-                f"Thank you for your purchase!"
-            )
-        except Exception as e:
-            # Payment succeeded but invoice creation failed
-            transaction_id = result.get("transaction_id", "")
-            return (
-                f"Payment processed successfully (Transaction: {transaction_id}), "
-                f"but there was an issue creating the invoice. Please contact support."
-            )
-
-    return purchase_song
-
-
 def get_music_model() -> ChatOpenAI:
     """Get the LLM configured for music queries."""
     return ChatOpenAI(
@@ -528,7 +415,6 @@ def music_agent(messages: list[BaseMessage], user_id: int = 1) -> AIMessage:
         AI response message.
     """
     model = get_music_model()
-    purchase_tool = make_purchase_tool(user_id)
     tools = [
         get_genres,
         get_artists_in_genre,
@@ -540,7 +426,6 @@ def music_agent(messages: list[BaseMessage], user_id: int = 1) -> AIMessage:
         search_tracks_by_artist,
         search_songs_by_title,
         search_song_video,
-        purchase_tool,
     ]
     model_with_tools = model.bind_tools(tools)
     

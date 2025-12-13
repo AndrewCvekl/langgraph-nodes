@@ -105,16 +105,31 @@ def handle_interrupt(interrupt_data: list) -> Any:
         
         while True:
             try:
-                user_input = input("\n   Enter choice (1/2) or type response: ").strip()
-                
-                if user_input == "1" or user_input.lower() == "yes":
-                    return "Yes"
-                elif user_input == "2" or user_input.lower() == "no":
-                    return "No"
-                elif user_input in choices:
+                user_input = input(f"\n   Enter choice (1-{len(choices)}) or type response: ").strip()
+
+                # Convenience for classic Yes/No prompts (only when choices are actually Yes/No)
+                is_yes_no = (
+                    len(choices) == 2
+                    and choices[0].strip().lower() == "yes"
+                    and choices[1].strip().lower() == "no"
+                )
+                if is_yes_no:
+                    if user_input == "1" or user_input.lower() == "yes":
+                        return "Yes"
+                    if user_input == "2" or user_input.lower() == "no":
+                        return "No"
+
+                # Numeric selection for any number of choices
+                if user_input.isdigit():
+                    idx = int(user_input)
+                    if 1 <= idx <= len(choices):
+                        return choices[idx - 1]
+
+                # Exact match fallback
+                if user_input in choices:
                     return user_input
-                else:
-                    print("   Please enter 1, 2, 'yes', or 'no'")
+
+                print(f"   Please enter a number from 1 to {len(choices)}")
             except (EOFError, KeyboardInterrupt):
                 return "No"
     

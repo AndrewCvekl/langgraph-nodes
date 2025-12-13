@@ -17,6 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
+import re
 
 from app.models.state import AppState, get_initial_state
 from app.config import config
@@ -25,6 +26,7 @@ from app.agents.music import music_agent
 from app.agents.customer import customer_agent
 from app.graphs.email_subgraph import email_subgraph
 from app.graphs.lyrics_subgraph import lyrics_subgraph
+from app.graphs.purchase_subgraph import purchase_subgraph
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +58,11 @@ def ingest_user_message(state: AppState) -> dict:
     
     logger.info(f"[ingest_user_message] Last user message: {last_user_msg[:50]}...")
     
-    # Clear completed email flow to prevent accidental re-entry
+    # Clear completed flows to prevent accidental re-entry
     email_flow = state.get("email_flow", {})
     email_flow_status = email_flow.get("status", "")
+    purchase_flow = state.get("purchase_flow", {})
+    purchase_flow_status = purchase_flow.get("status", "")
     updates = {
         "last_user_msg": last_user_msg,
         "assistant_messages": [],  # Clear for new turn
@@ -67,16 +71,36 @@ def ingest_user_message(state: AppState) -> dict:
     # If email flow completed, reset it
     if email_flow_status in ("done", "cancelled", "failed"):
         updates["email_flow"] = {}
+    if purchase_flow_status in ("done", "cancelled", "failed"):
+        updates["purchase_flow"] = {}
     
     return updates
 
 
 # Node 2: Route intent
-def route_intent(state: AppState) -> Command[Literal["normal_conversation", "run_email_update_subgraph", "run_lyrics_subgraph"]]:
+def route_intent(
+    state: AppState,
+) -> Command[
+    Literal[
+        "normal_conversation",
+        "run_email_update_subgraph",
+        "run_lyrics_subgraph",
+        "run_purchase_subgraph",
+    ]
+]:
     """Use the router agent to determine intent and route accordingly."""
     messages = state.get("messages", [])
     logger.info(f"[route_intent] Routing with {len(messages)} message(s)")
     
+    # Deterministic routing overrides (best practice: don't make the LLM guess):
+    # - If user replies with a bare number after we showed Track IDs, treat it as a purchase selection.
+    last_msg_raw = (state.get("last_user_msg", "") or "").strip()
+    last_msg = last_msg_raw.lower()
+    last_track_ids = state.get("last_track_ids", []) or []
+    if re.fullmatch(r"\d+", last_msg) and last_track_ids:
+        logger.info("[route_intent] Detected numeric selection with last_track_ids context -> purchase")
+        return Command(update={"route": "purchase"}, goto="run_purchase_subgraph")
+
     # Get route from router agent
     route = get_route_choice(messages)
     logger.info(f"[route_intent] Route decision: {route}")
@@ -102,6 +126,11 @@ def route_intent(state: AppState) -> Command[Literal["normal_conversation", "run
         return Command(
             update={"route": "lyrics_search"},
             goto="run_lyrics_subgraph",
+        )
+    elif route == "purchase":
+        return Command(
+            update={"route": "purchase"},
+            goto="run_purchase_subgraph",
         )
     else:
         return Command(
@@ -175,10 +204,16 @@ def normal_conversation(state: AppState) -> dict:
         
         response_text = response.content if hasattr(response, 'content') else str(response)
         logger.info(f"[normal_conversation] Response generated: {response_text[:50]}...")
+
+        # Capture Track IDs from the assistant response to support “buy it” follow-ups.
+        # This is intentionally simple: it only looks for patterns we already print.
+        import re
+        track_ids = [int(x) for x in re.findall(r"\bTrack ID:\s*(\d+)\b", response_text)]
         
         return {
             "messages": [AIMessage(content=response_text)],
             "assistant_messages": add_assistant_message(state, response_text),
+            "last_track_ids": track_ids[:10],
         }
     except Exception as e:
         logger.error(f"[normal_conversation] Error: {e}", exc_info=True)
@@ -224,6 +259,8 @@ def create_app_graph() -> StateGraph:
     builder.add_node("run_email_update_subgraph", run_email_update_subgraph)
     # Add lyrics subgraph directly (not wrapped) so state updates show before interrupts
     builder.add_node("run_lyrics_subgraph", lyrics_subgraph)
+    # Add purchase subgraph directly so interrupts work cleanly
+    builder.add_node("run_purchase_subgraph", purchase_subgraph)
     
     # Add edges
     builder.add_edge(START, "ingest_user_message")
@@ -232,6 +269,7 @@ def create_app_graph() -> StateGraph:
     builder.add_edge("normal_conversation", END)
     builder.add_edge("run_email_update_subgraph", END)
     builder.add_edge("run_lyrics_subgraph", END)
+    builder.add_edge("run_purchase_subgraph", END)
     
     return builder
 

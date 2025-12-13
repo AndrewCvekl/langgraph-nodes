@@ -175,6 +175,7 @@ def lyrics_catalogue_lookup(state: AppState) -> dict:
             "catalogue_track": catalogue_track,
             "already_owned": already_owned,
         },
+        "last_track_ids": [catalogue_track.get("TrackId")] if catalogue_track else [],
         "assistant_messages": add_assistant_message(state, msg),
     }
 
@@ -256,7 +257,7 @@ def lyrics_youtube_search(state: AppState) -> dict:
 
 
 # Node B5: Render player and make offer message
-def lyrics_render_player_and_offer(state: AppState) -> Command[Literal["lyrics_interrupt_buy_confirm", "lyrics_interrupt_request_confirm", "lyrics_done"]]:
+def lyrics_render_player_and_offer(state: AppState) -> Command[Literal["lyrics_invoke_payment", "lyrics_interrupt_request_confirm", "lyrics_done"]]:
     """Render the YouTube player and prepare the offer message.
 
     Routes based on catalogue status and ownership:
@@ -293,8 +294,9 @@ def lyrics_render_player_and_offer(state: AppState) -> Command[Literal["lyrics_i
         }]
         goto = "lyrics_done"
     elif catalogue_track:
-        # Song is in catalogue but not owned - route to purchase interrupt
-        goto = "lyrics_interrupt_buy_confirm"
+        # Song is in catalogue but not owned - route to payment flow.
+        # Payment confirmation is handled in the payment subgraph.
+        goto = "lyrics_invoke_payment"
     else:
         # Song not in catalogue - route to request interrupt
         goto = "lyrics_interrupt_request_confirm"
@@ -447,7 +449,6 @@ def create_lyrics_subgraph() -> StateGraph:
     builder.add_node("lyrics_interrupt_listen_confirm", lyrics_interrupt_listen_confirm)
     builder.add_node("lyrics_youtube_search", lyrics_youtube_search)
     builder.add_node("lyrics_render_player_and_offer", lyrics_render_player_and_offer)
-    builder.add_node("lyrics_interrupt_buy_confirm", lyrics_interrupt_buy_confirm)
     builder.add_node("lyrics_invoke_payment", lyrics_invoke_payment)
     builder.add_node("lyrics_interrupt_request_confirm", lyrics_interrupt_request_confirm)
     # Add payment subgraph directly as a node

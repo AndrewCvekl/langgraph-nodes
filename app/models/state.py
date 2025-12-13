@@ -72,6 +72,29 @@ class PaymentState(TypedDict, total=False):
     error: str
 
 
+class PurchaseFlowState(TypedDict, total=False):
+    """State for the purchase (checkout) flow."""
+
+    status: Literal[
+        "idle",
+        "resolving",
+        "done",
+        "cancelled",
+        "failed",
+    ]
+    # Last free-text query the user gave us (title or "track id 123")
+    query: str
+    # Parsed TrackId if present in the query
+    parsed_track_id: Optional[int]
+    # Parsed numeric reference (may be a TrackId or a 1-based list index)
+    numeric_ref: Optional[int]
+    # Candidate TrackIds when multiple matches exist
+    candidate_track_ids: list[int]
+    # Final TrackId chosen for purchase
+    selected_track_id: Optional[int]
+    error: str
+
+
 class AppState(TypedDict, total=False):
     """Main application state for the music store support bot.
     
@@ -93,7 +116,7 @@ class AppState(TypedDict, total=False):
     last_user_msg: str
     
     # Routing decision from router agent
-    route: Literal["normal", "update_email", "lyrics_search"]
+    route: Literal["normal", "update_email", "lyrics_search", "purchase"]
     
     # Session-based verification status (persists until app restart)
     verified: bool
@@ -102,6 +125,12 @@ class AppState(TypedDict, total=False):
     email_flow: EmailFlowState
     lyrics_flow: LyricsFlowState
     payment: PaymentState
+    purchase_flow: PurchaseFlowState
+
+    # Lightweight cross-turn context for “buy it” follow-ups in normal chat.
+    # When we show Track IDs, we store them here so the purchase flow can
+    # resolve ambiguous references.
+    last_track_ids: list[int]
     
     # UI output messages - structured payloads for the UI
     # Each message can be:
@@ -149,6 +178,18 @@ def get_default_payment() -> PaymentState:
     }
 
 
+def get_default_purchase_flow() -> PurchaseFlowState:
+    return {
+        "status": "idle",
+        "query": "",
+        "parsed_track_id": None,
+        "numeric_ref": None,
+        "candidate_track_ids": [],
+        "selected_track_id": None,
+        "error": "",
+    }
+
+
 def get_initial_state(user_id: int) -> AppState:
     """Get initial application state for a new conversation."""
     return {
@@ -160,6 +201,8 @@ def get_initial_state(user_id: int) -> AppState:
         "email_flow": get_default_email_flow(),
         "lyrics_flow": get_default_lyrics_flow(),
         "payment": get_default_payment(),
+        "purchase_flow": get_default_purchase_flow(),
+        "last_track_ids": [],
         "assistant_messages": [],
     }
 

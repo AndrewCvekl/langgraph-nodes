@@ -17,7 +17,7 @@ from app.config import config
 class Route(BaseModel):
     """Routing decision from the router agent."""
 
-    choice: Literal["normal", "update_email", "lyrics_search"] = Field(
+    choice: Literal["normal", "update_email", "lyrics_search", "purchase"] = Field(
         description="The route to take based on user intent"
     )
     reasoning: str = Field(
@@ -51,13 +51,19 @@ Your job is to analyze the user's message and decide which handler should proces
    - User provides multiple words/phrases that are clearly lyrics
    - User describes a song they're looking for with lyrics
    - DO NOT use for single words, greetings, or casual conversation that happens to contain words that appear in songs
-   - "I'd like to purchase [song name]"
+
+4. **purchase** - Use when the user is trying to BUY a specific song/track, e.g.:
+   - "can I buy it?" / "buy it" / "purchase it"
+   - "I want to purchase [song title]" / "buy [song title]"
+   - "purchase track id 2269" / "buy track 2269"
+   - Any message clearly about paying/checkout for a song (not just asking about catalogue availability)
 
 ## Important Rules
 
 - Simple greetings like "hi", "hello", "hey" are ALWAYS "normal", even if they appear in song lyrics
 - If the assistant just asked "Is there anything else I can help with?", responses like "hi", "yes", "no", "thanks" should be "normal"
 - "lyrics_search" requires clear intent to identify a song - not just saying a word that happens to be in lyrics
+- "purchase" is only for buying/checkout. If the user is only browsing or asking about price/availability, choose "normal".
 - When in doubt, choose "normal"
 
 ## Examples
@@ -82,6 +88,12 @@ Route: normal (account info query, not changing)
 
 User: "I heard a song that goes 'we will rock you'"
 Route: lyrics_search (identifying song by lyrics)
+
+User: "can I buy it?"
+Route: purchase (buy intent)
+
+User: "purchase track id 2269"
+Route: purchase (explicit track id)
 
 Assistant: "Is there anything else I can help with?"
 User: "hi"
@@ -127,7 +139,7 @@ def router_agent(messages: list[BaseMessage]) -> Route:
     return result
 
 
-def get_route_choice(messages: list[BaseMessage]) -> Literal["normal", "update_email", "lyrics_search"]:
+def get_route_choice(messages: list[BaseMessage]) -> Literal["normal", "update_email", "lyrics_search", "purchase"]:
     """Get just the route choice from the router agent.
 
     Args:

@@ -79,10 +79,23 @@ def payment_interrupt_confirm(state: AppState) -> Command[Literal["payment_execu
     """Interrupt to confirm the purchase."""
     payment = state.get("payment", {})
     total = payment.get("total", 0)
+    items = payment.get("items", []) or []
+    
+    # Provide a concise context summary in the interrupt payload so the UI
+    # can show what is being purchased even if assistant_messages aren't printed
+    # before the interrupt.
+    if items:
+        preview = ", ".join(item.get("name", "Unknown") for item in items[:2])
+        if len(items) > 2:
+            preview = f"{preview} (+{len(items) - 2} more)"
+        context = f"Order: {preview}\nTotal: ${total:.2f}"
+    else:
+        context = f"Total: ${total:.2f}"
     
     decision = interrupt({
         "type": "confirm",
         "title": "Confirm Purchase",
+        "context": context,
         "text": f"Confirm purchase for ${total:.2f}?",
         "choices": ["Yes", "No"],
     })
@@ -251,7 +264,7 @@ def create_payment_subgraph() -> StateGraph:
     
     # Add all nodes
     builder.add_node("payment_build_quote", payment_build_quote)
-    # Removed payment_interrupt_confirm - confirmation already happened in parent flow
+    builder.add_node("payment_interrupt_confirm", payment_interrupt_confirm)
     builder.add_node("payment_execute_charge", payment_execute_charge)
     builder.add_node("payment_commit_invoice", payment_commit_invoice)
     builder.add_node("payment_render_receipt", payment_render_receipt)
@@ -261,15 +274,17 @@ def create_payment_subgraph() -> StateGraph:
     
     # Add edges
     builder.set_entry_point("payment_build_quote")
-    # Go directly to charge after building quote - no extra confirmation needed
-    builder.add_edge("payment_build_quote", "payment_execute_charge")
+    # Confirm purchase after building quote
+    builder.add_edge("payment_build_quote", "payment_interrupt_confirm")
     builder.add_edge("payment_commit_invoice", "payment_render_receipt")
     builder.add_edge("payment_render_receipt", "payment_done")
     builder.add_edge("payment_cancel", "payment_done")
     builder.add_edge("payment_failed", "payment_done")
     builder.add_edge("payment_done", END)
     
-    # Note: payment_execute_charge uses Command to route
+    # Note:
+    # - payment_interrupt_confirm uses Command to route to execute_charge or cancel
+    # - payment_execute_charge uses Command to route to commit_invoice or failed
     
     return builder
 
