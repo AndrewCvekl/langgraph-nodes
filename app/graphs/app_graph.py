@@ -12,18 +12,19 @@ Compiles with a checkpointer for persistence and interrupt handling.
 import logging
 from typing import Literal, Any
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode
 import re
 
 from app.models.state import AppState, get_initial_state
 from app.config import config
 from app.agents.router import get_route_choice
-from app.agents.music import music_agent
-from app.agents.customer import customer_agent
+from app.agents.music import MUSIC_SYSTEM_PROMPT, get_music_model, get_music_tools
+from app.agents.customer import CUSTOMER_SYSTEM_PROMPT, get_customer_model, make_customer_tools
 from app.graphs.email_subgraph import email_subgraph
 from app.graphs.lyrics_subgraph import lyrics_subgraph
 from app.graphs.purchase_subgraph import purchase_subgraph
@@ -82,7 +83,7 @@ def route_intent(
     state: AppState,
 ) -> Command[
     Literal[
-        "normal_conversation",
+        "normal_select_agent",
         "run_email_update_subgraph",
         "run_lyrics_subgraph",
         "run_purchase_subgraph",
@@ -135,31 +136,27 @@ def route_intent(
     else:
         return Command(
             update={"route": "normal"},
-            goto="normal_conversation",
+            goto="normal_select_agent",
         )
 
 
-# Node 3: Normal conversation (music/customer queries)
-def normal_conversation(state: AppState) -> dict:
-    """Handle normal conversation using music or customer agents."""
-    messages = state.get("messages", [])
-    user_id = state.get("user_id", 1)
-    last_msg = state.get("last_user_msg", "").lower()
-    
-    logger.info(f"[normal_conversation] Handling: {last_msg[:50]}...")
-    
-    # Check if this is a fresh conversation start after a conversation-ending message
-    # This prevents the agent from misinterpreting greetings in context of previous conversations
+def _messages_for_normal_turn(state: AppState) -> list:
+    """Get the message list to use for the normal conversation LLM call.
+
+    We preserve the previous "fresh start" behavior where a greeting after a
+    conversation-ending message is treated as a fresh start.
+    """
+    messages = state.get("messages", []) or []
+    last_msg = (state.get("last_user_msg", "") or "").lower()
+
     is_fresh_start = False
     if messages:
-        # Get the last assistant message
         last_assistant_msg = None
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
-                last_assistant_msg = msg.content.lower() if hasattr(msg, 'content') else str(msg).lower()
+                last_assistant_msg = msg.content.lower() if hasattr(msg, "content") else str(msg).lower()
                 break
-        
-        # Check if last assistant message was a conversation-ending message
+
         conversation_enders = [
             "is there anything else i can help with",
             "let me know if you need anything else",
@@ -167,61 +164,105 @@ def normal_conversation(state: AppState) -> dict:
             "what else can i help you with",
             "anything else i can help with",
         ]
-        
-        # Check if current message is a simple greeting
+
         simple_greetings = ["hi", "hello", "hey", "hi there", "hello there", "hey there"]
-        
+
         if last_assistant_msg and any(ender in last_assistant_msg for ender in conversation_enders):
             if any(greeting == last_msg.strip() for greeting in simple_greetings):
                 is_fresh_start = True
-                logger.info("[normal_conversation] Detected fresh conversation start after ending message")
-    
-    # Filter messages if it's a fresh start - only pass the current greeting
-    messages_to_use = messages
-    if is_fresh_start:
-        # Only include the current user message (the greeting)
-        last_user_message = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                last_user_message = msg
-                break
-        if last_user_message:
-            messages_to_use = [last_user_message]
-            logger.info("[normal_conversation] Filtered conversation history for fresh start")
-    
-    # Determine which agent to use based on message content
-    # Simple heuristic: if mentions account/email/phone/address -> customer agent
+                logger.info("[normal] Detected fresh conversation start after ending message")
+
+    if not is_fresh_start:
+        return messages
+
+    # Only include the current user message (the greeting)
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            logger.info("[normal] Filtered conversation history for fresh start")
+            return [msg]
+    return messages
+
+
+# Node 3a: Decide which normal agent to use (music vs customer)
+def normal_select_agent(
+    state: AppState,
+) -> Command[Literal["normal_music_llm", "normal_customer_llm"]]:
+    last_msg = (state.get("last_user_msg", "") or "").lower()
     customer_keywords = ["account", "email", "phone", "address", "profile", "info", "invoice", "purchase", "order"]
     use_customer_agent = any(kw in last_msg for kw in customer_keywords)
-    
-    logger.info(f"[normal_conversation] Using {'customer' if use_customer_agent else 'music'} agent")
-    
-    try:
-        if use_customer_agent:
-            response = customer_agent(messages_to_use, user_id)
-        else:
-            response = music_agent(messages_to_use, user_id)
-        
-        response_text = response.content if hasattr(response, 'content') else str(response)
-        logger.info(f"[normal_conversation] Response generated: {response_text[:50]}...")
 
-        # Capture Track IDs from the assistant response to support “buy it” follow-ups.
-        # This is intentionally simple: it only looks for patterns we already print.
-        import re
-        track_ids = [int(x) for x in re.findall(r"\bTrack ID:\s*(\d+)\b", response_text)]
-        
-        return {
-            "messages": [AIMessage(content=response_text)],
-            "assistant_messages": add_assistant_message(state, response_text),
-            "last_track_ids": track_ids[:10],
-        }
-    except Exception as e:
-        logger.error(f"[normal_conversation] Error: {e}", exc_info=True)
-        error_msg = f"I apologize, but I encountered an error: {str(e)}. Please try again."
-        return {
-            "messages": [AIMessage(content=error_msg)],
-            "assistant_messages": add_assistant_message(state, error_msg),
-        }
+    choice: Literal["music", "customer"] = "customer" if use_customer_agent else "music"
+    logger.info(f"[normal] Selected agent: {choice}")
+
+    return Command(
+        update={"normal_agent": choice},
+        goto="normal_customer_llm" if choice == "customer" else "normal_music_llm",
+    )
+
+
+def normal_music_llm(state: AppState) -> Command[Literal["normal_music_tools", "normal_finalize"]]:
+    """LLM step for music queries. Returns tool calls or a final answer."""
+    model = get_music_model()
+    tools = get_music_tools()
+    model_with_tools = model.bind_tools(tools)
+
+    msgs = _messages_for_normal_turn(state)
+    response = model_with_tools.invoke([SystemMessage(content=MUSIC_SYSTEM_PROMPT)] + msgs)
+    goto = "normal_music_tools" if getattr(response, "tool_calls", None) else "normal_finalize"
+    return Command(update={"messages": [response]}, goto=goto)
+
+
+def normal_customer_llm(state: AppState) -> Command[Literal["normal_customer_tools", "normal_finalize"]]:
+    """LLM step for customer/account queries. Returns tool calls or a final answer."""
+    user_id = state.get("user_id", 1)
+    model = get_customer_model()
+    tools = make_customer_tools(user_id)
+    model_with_tools = model.bind_tools(tools)
+
+    msgs = _messages_for_normal_turn(state)
+    response = model_with_tools.invoke([SystemMessage(content=CUSTOMER_SYSTEM_PROMPT)] + msgs)
+    goto = "normal_customer_tools" if getattr(response, "tool_calls", None) else "normal_finalize"
+    return Command(update={"messages": [response]}, goto=goto)
+
+
+# Tool nodes for normal conversation loops
+_music_tools_node = ToolNode(get_music_tools())
+
+
+def normal_customer_tools(state: AppState) -> dict:
+    """Execute customer tool calls via ToolNode, binding tools to the current user."""
+    user_id = state.get("user_id", 1)
+    tools = make_customer_tools(user_id)
+    node = ToolNode(tools)
+    # ToolNode expects a state with "messages"; it returns {"messages": [ToolMessage, ...]}.
+    return node.invoke({"messages": state.get("messages", [])})
+
+
+def normal_finalize(state: AppState) -> dict:
+    """Finalize normal conversation turn by emitting UI output + track-id context."""
+    messages = state.get("messages", []) or []
+
+    # Find the last AI message (should be the final answer after tool loop).
+    last_ai: AIMessage | None = None
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            last_ai = m
+            break
+
+    if last_ai is None:
+        # Defensive fallback
+        text = "How can I help you today?"
+        return {"assistant_messages": add_assistant_message(state, text)}
+
+    response_text = last_ai.content if hasattr(last_ai, "content") else str(last_ai)
+
+    # Capture Track IDs from the assistant response to support “buy it” follow-ups.
+    track_ids = [int(x) for x in re.findall(r"\bTrack ID:\s*(\d+)\b", response_text)]
+
+    return {
+        "assistant_messages": add_assistant_message(state, response_text),
+        "last_track_ids": track_ids[:10],
+    }
 
 
 # Node 4: Run email update subgraph
@@ -255,7 +296,12 @@ def create_app_graph() -> StateGraph:
     # Add nodes
     builder.add_node("ingest_user_message", ingest_user_message)
     builder.add_node("route_intent", route_intent)
-    builder.add_node("normal_conversation", normal_conversation)
+    builder.add_node("normal_select_agent", normal_select_agent)
+    builder.add_node("normal_music_llm", normal_music_llm)
+    builder.add_node("normal_music_tools", _music_tools_node)
+    builder.add_node("normal_customer_llm", normal_customer_llm)
+    builder.add_node("normal_customer_tools", normal_customer_tools)
+    builder.add_node("normal_finalize", normal_finalize)
     builder.add_node("run_email_update_subgraph", run_email_update_subgraph)
     # Add lyrics subgraph directly (not wrapped) so state updates show before interrupts
     builder.add_node("run_lyrics_subgraph", lyrics_subgraph)
@@ -266,10 +312,14 @@ def create_app_graph() -> StateGraph:
     builder.add_edge(START, "ingest_user_message")
     builder.add_edge("ingest_user_message", "route_intent")
     # route_intent uses Command to specify next node
-    builder.add_edge("normal_conversation", END)
+    builder.add_edge("normal_finalize", END)
     builder.add_edge("run_email_update_subgraph", END)
     builder.add_edge("run_lyrics_subgraph", END)
     builder.add_edge("run_purchase_subgraph", END)
+
+    # Normal conversation loop edges
+    builder.add_edge("normal_music_tools", "normal_music_llm")
+    builder.add_edge("normal_customer_tools", "normal_customer_llm")
     
     return builder
 

@@ -404,18 +404,9 @@ def get_music_model() -> ChatOpenAI:
     )
 
 
-def music_agent(messages: list[BaseMessage], user_id: int = 1) -> AIMessage:
-    """Run the music agent to answer catalogue queries.
-
-    Args:
-        messages: Conversation messages.
-        user_id: The authenticated user's ID (defaults to 1).
-
-    Returns:
-        AI response message.
-    """
-    model = get_music_model()
-    tools = [
+def get_music_tools():
+    """Return the list of music tools for ToolNode execution."""
+    return [
         get_genres,
         get_artists_in_genre,
         get_albums_in_genre,
@@ -427,6 +418,20 @@ def music_agent(messages: list[BaseMessage], user_id: int = 1) -> AIMessage:
         search_songs_by_title,
         search_song_video,
     ]
+
+
+def music_agent(messages: list[BaseMessage], user_id: int = 1) -> AIMessage:
+    """Run the music agent to answer catalogue queries.
+
+    Args:
+        messages: Conversation messages.
+        user_id: The authenticated user's ID (defaults to 1).
+
+    Returns:
+        AI response message.
+    """
+    model = get_music_model()
+    tools = get_music_tools()
     model_with_tools = model.bind_tools(tools)
     
     # Prepend system prompt

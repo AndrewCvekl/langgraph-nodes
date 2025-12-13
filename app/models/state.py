@@ -118,6 +118,9 @@ class AppState(TypedDict, total=False):
     # Routing decision from router agent
     route: Literal["normal", "update_email", "lyrics_search", "purchase"]
     
+    # Selection for which "normal conversation" agent to use for this turn.
+    normal_agent: Literal["music", "customer"]
+
     # Session-based verification status (persists until app restart)
     verified: bool
     
