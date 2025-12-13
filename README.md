@@ -34,7 +34,7 @@ Main App Graph
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.11–3.13
 - OpenAI API key
 - (Optional) LangSmith API key for tracing
 
@@ -79,6 +79,26 @@ python -m app.main
 music-support
 ```
 
+### Web UI (FastAPI + Vite build)
+
+This repo includes a polished frontend in `Minimal Chatbot Interface Design/`. The backend serves the built UI and exposes `/api/chat` + `/api/resume` that follow the interrupt protocol (`app/ui/interrupt_protocol.md`).
+
+1) Build the frontend:
+
+```bash
+cd "Minimal Chatbot Interface Design"
+npm i
+npm run build
+```
+
+2) Run the web server (from the repo root):
+
+```bash
+uv run uvicorn app.server:app --reload --port 8000
+```
+
+3) Open `http://localhost:8000`.
+
 ### Demo Script (Automated Tests)
 
 ```bash
@@ -100,6 +120,7 @@ langgraph up
 ```
 app/
 ├── main.py              # CLI entry point
+├── server.py            # FastAPI server (serves UI + /api endpoints)
 ├── config.py            # Environment settings
 ├── db.py                # Chinook database bootstrap
 ├── models/
@@ -121,6 +142,12 @@ app/
 │   └── payment_mock.py  # Payment processing mock
 └── ui/
     └── interrupt_protocol.md  # UI contract documentation
+```
+
+Frontend:
+
+```
+Minimal Chatbot Interface Design/   # Vite + React UI (build output in build/)
 ```
 
 ## Example Interactions
